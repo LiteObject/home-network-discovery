@@ -84,7 +84,7 @@ Options:
 If you're using an Eero mesh network and only seeing one device (usually 192.168.1.254), use these enhanced scanning options:
 
 ```bash
-# Enhanced Eero scanning
+# Enhanced mesh network scanning
 python wifi_scanner.py --arp-scan --aggressive -n 192.168.1.0/24
 
 # Detect all network ranges and scan the best one
