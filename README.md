@@ -79,7 +79,7 @@ Options:
   --detect-networks     Show all detected network interfaces and ranges
 ```
 
-## Mesh Network Support (Eero Users)
+## Mesh Network Support
 
 If you're using an Eero mesh network and only seeing one device (usually 192.168.1.254), use these enhanced scanning options:
 
