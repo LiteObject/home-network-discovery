@@ -33,6 +33,9 @@ python wifi_scanner.py --arp-scan --aggressive
 # Full scan with port detection
 python wifi_scanner.py -p --show-services
 
+# If you have multiple adapters (Hyper-V, WSL, VPN), scan your WiFi subnet explicitly
+python wifi_scanner.py -n 192.168.7.0/24 --arp-scan --aggressive --enrich
+
 # Deep enrichment: discover device names, models, mDNS services, UPnP info
 python wifi_scanner.py --enrich
 
@@ -95,11 +98,14 @@ If you're using an Eero mesh network and only seeing one device (usually 192.168
 # Enhanced mesh network scanning
 python wifi_scanner.py --arp-scan --aggressive -n 192.168.1.0/24
 
-# Detect all network ranges and scan the best one
-python wifi_scanner.py --detect-networks --arp-scan
+# List detected network ranges, then scan the WiFi subnet explicitly
+python wifi_scanner.py --detect-networks
+python wifi_scanner.py -n 192.168.1.0/24 --arp-scan --aggressive
 ```
 
 The tool automatically detects mesh network isolation and uses specialized techniques to discover devices that may be hidden from traditional ping scans.
+
+If your machine has multiple active adapters, auto-detection may prefer a virtual network before your home WiFi. This is common with Hyper-V, WSL, Docker, VPNs, and some virtualization software. Use `--detect-networks` to list available ranges, then rerun with `-n` for the WiFi subnet you actually want to scan.
 
 ## Output Examples
 
@@ -179,6 +185,9 @@ A: Some features may require administrator/root privileges, especially ARP scann
 **Q: "No devices found" on known active network**
 A: Try `--detect-networks` to see available networks, then specify the correct range with `-n`.
 
+**Q: It scanned Hyper-V / WSL / VPN instead of my home WiFi**
+A: That means multiple adapters were detected and the wrong subnet was selected. Run `python wifi_scanner.py --detect-networks`, identify your WiFi range, then rerun with `-n`.
+
 ### Network-Specific Tips
 
 - **Eero/Mesh Networks**: Always use `--arp-scan --aggressive`
@@ -210,7 +219,7 @@ Always ensure you have permission to scan the networks you target.
 # Scan specific range
 python wifi_scanner.py -n 10.0.0.0/24
 
-# Auto-detect and scan all networks
+# Show all detected ranges, then choose the one you want
 python wifi_scanner.py --detect-networks
 ```
 
