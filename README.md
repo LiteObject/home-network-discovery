@@ -8,6 +8,7 @@ A powerful Python tool for discovering and analyzing devices on your home networ
 - **Multi-Method Discovery**: Uses ICMP ping, ARP scanning, and aggressive mesh network techniques
 - **Enhanced Mesh Support**: Special algorithms for Eero, Google Nest, and other mesh networks
 - **Device Intelligence**: Identifies device types (routers, computers, phones, IoT devices, printers)
+- **Deep Device Enrichment**: Optional mDNS/Bonjour, SSDP/UPnP, NetBIOS, HTTP, and TLS probing to discover friendly names, manufacturer, model, serial numbers, and certificate info
 - **MAC Vendor Lookup**: Discovers device manufacturers using online databases
 - **Port Scanning**: Optional scanning for open ports and service identification
 - **Multiple Export Formats**: JSON, CSV, and HTML reports with color-coded device types
@@ -31,6 +32,12 @@ python wifi_scanner.py --arp-scan --aggressive
 
 # Full scan with port detection
 python wifi_scanner.py -p --show-services
+
+# Deep enrichment: discover device names, models, mDNS services, UPnP info
+python wifi_scanner.py --enrich
+
+# Ultimate scan: enrichment + ports + HTML report
+python wifi_scanner.py --enrich -p --show-services --export html
 
 # Export results to different formats
 python wifi_scanner.py --export html
@@ -77,6 +84,7 @@ Options:
   --arp-scan            Use ARP scanning (finds devices that don't respond to ping)
   --aggressive          Use aggressive scanning for mesh networks
   --detect-networks     Show all detected network interfaces and ranges
+  --enrich              Deep device enrichment (mDNS, SSDP/UPnP, NetBIOS, HTTP, TLS)
 ```
 
 ## Mesh Network Support
@@ -132,7 +140,28 @@ The scanner intelligently categorizes devices based on various signals:
 - **Mobile**: Smartphones, tablets
 - **Printer**: Network printers, scanners
 - **IoT Device**: Smart home devices, sensors, cameras
+- **Smart Speaker**: Echo, Google Home, HomePod
+- **HomeKit Device**: Apple HomeKit accessories
+- **Gaming Console**: Xbox, PlayStation, Nintendo
 - **Unknown**: Devices that couldn't be categorized
+
+## Deep Enrichment (`--enrich`)
+
+When you pass `--enrich`, the scanner runs five additional discovery protocols
+after the initial ping/ARP scan. These are all **opt-in** so normal scans stay fast.
+
+| Protocol | What it discovers | How it works |
+|---|---|---|
+| **mDNS / Bonjour** | Friendly names, advertised services (AirPlay, Chromecast, printers, SSH, SMB …), model & firmware via TXT records | Multicast DNS service browsing on 224.0.0.251:5353 via the `zeroconf` library |
+| **SSDP / UPnP** | Manufacturer, model, serial number, presentation URL, device type | Sends an M-SEARCH to 239.255.255.250:1900, then fetches the XML device description |
+| **NetBIOS** | Windows machine name | `nbtstat -A` (Windows) or raw NBNS NBSTAT query on UDP 137 |
+| **HTTP** | Page `<title>`, `Server` header, `X-Powered-By` | GET request to port 80/443/8080 on each device |
+| **TLS** | Certificate subject CN, issuer, SANs, expiry, TLS version & cipher | TLS handshake on port 443 |
+
+```bash
+# Example: enrichment with HTML export
+python wifi_scanner.py --enrich --export html --export-file network_audit.html
+```
 
 ## Troubleshooting
 
@@ -200,8 +229,9 @@ python wifi_scanner.py -p --show-services --export html --export-file network_au
 ## Dependencies
 
 - **Python 3.7+**: Required for modern language features
-- **requests**: For MAC vendor lookups (optional but recommended)
-- **Standard library modules**: subprocess, socket, ipaddress, concurrent.futures
+- **requests**: For MAC vendor lookups and UPnP description fetching (optional but recommended)
+- **zeroconf**: For mDNS/Bonjour service discovery with `--enrich` (optional, gracefully skipped if missing)
+- **Standard library modules**: subprocess, socket, ipaddress, ssl, struct, xml.etree, concurrent.futures
 
 ## Contributing
 
