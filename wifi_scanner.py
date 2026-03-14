@@ -10,6 +10,8 @@ Author: LiteObject
 License: MIT
 """
 
+# pylint: disable=too-many-lines
+
 import argparse
 import csv
 import ipaddress
@@ -21,7 +23,11 @@ import socket
 import subprocess
 import sys
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import (
+    ThreadPoolExecutor,
+    TimeoutError as FutureTimeoutError,
+    as_completed,
+)
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Any
 
@@ -31,9 +37,11 @@ import xml.etree.ElementTree as ET
 
 try:
     import requests
+    import urllib3
 except ImportError:
     print("Warning: requests module not found. MAC vendor lookup will be disabled.")
     requests = None
+    urllib3 = None
 
 try:
     from zeroconf import Zeroconf, ServiceBrowser, IPVersion  # type: ignore[import-untyped]
@@ -192,7 +200,11 @@ class NetworkScanner:
                         f"Found active gateway at {gateway}, using range {range_test}"
                     )
                     return range_test
-            except Exception:
+            except (
+                ipaddress.AddressValueError,
+                ipaddress.NetmaskValueError,
+                ValueError,
+            ):
                 continue
 
         return "192.168.1.0/24"  # Safe fallback for most home networks
@@ -229,7 +241,7 @@ class NetworkScanner:
                     )
                     if result.returncode == 0:
                         networks.extend(self._parse_ifconfig(result.stdout))
-        except Exception as e:
+        except (OSError, subprocess.SubprocessError, UnicodeDecodeError) as e:
             print(f"Warning: Could not detect network interfaces: {e}")
 
         return list(set(networks))  # Remove duplicates
@@ -263,7 +275,7 @@ class NetworkScanner:
                             if self._is_valid_ip(gateway):
                                 network = ".".join(gateway.split(".")[:-1]) + ".0/24"
                                 return network
-        except Exception as e:
+        except (OSError, subprocess.SubprocessError, UnicodeDecodeError) as e:
             print(f"Windows network detection error: {e}")
 
         return "192.168.1.0/24"
@@ -272,7 +284,6 @@ class NetworkScanner:
         """Parse Windows ipconfig output to extract network ranges."""
         networks = []
         lines = output.split("\n")
-        current_adapter = ""
         ip_address = ""
         subnet_mask = ""
 
@@ -280,7 +291,6 @@ class NetworkScanner:
             line = line.strip()
 
             if "adapter" in line.lower() and ":" in line:
-                current_adapter = line
                 ip_address = ""
                 subnet_mask = ""
             elif "IPv4 Address" in line or "IP Address" in line:
@@ -305,7 +315,11 @@ class NetworkScanner:
                                     f"{ip_address}/{cidr}", strict=False
                                 )
                                 networks.append(str(network))
-                    except Exception:
+                    except (
+                        ipaddress.AddressValueError,
+                        ipaddress.NetmaskValueError,
+                        ValueError,
+                    ):
                         pass
 
         return networks
@@ -327,7 +341,11 @@ class NetworkScanner:
                         try:
                             network = ipaddress.IPv4Network(part, strict=False)
                             networks.append(str(network))
-                        except Exception:
+                        except (
+                            ipaddress.AddressValueError,
+                            ipaddress.NetmaskValueError,
+                            ValueError,
+                        ):
                             pass
 
         return networks
@@ -337,7 +355,7 @@ class NetworkScanner:
         networks = []
 
         lines = output.split("\n")
-        for i, line in enumerate(lines):
+        for line in lines:
             if "inet " in line and "inet addr:" in line:
                 # Extract IP address
                 ip_match = re.search(r"inet addr:(\d+\.\d+\.\d+\.\d+)", line)
@@ -354,7 +372,11 @@ class NetworkScanner:
                                         f"{ip}/{cidr}", strict=False
                                     )
                                     networks.append(str(network))
-                            except Exception:
+                            except (
+                                ipaddress.AddressValueError,
+                                ipaddress.NetmaskValueError,
+                                ValueError,
+                            ):
                                 pass
 
         return networks
@@ -363,7 +385,7 @@ class NetworkScanner:
         """Convert subnet mask to CIDR notation."""
         try:
             return ipaddress.IPv4Network(f"0.0.0.0/{subnet_mask}").prefixlen
-        except Exception:
+        except (ipaddress.NetmaskValueError, ValueError):
             return None
 
     def _is_valid_ip(self, ip: str) -> bool:
@@ -371,7 +393,7 @@ class NetworkScanner:
         try:
             ipaddress.IPv4Address(ip)
             return True
-        except Exception:
+        except ipaddress.AddressValueError:
             return False
 
     def _ping_host(self, ip: str) -> bool:
@@ -833,7 +855,7 @@ class NetworkScanner:
                 )
             return {}
 
-        SERVICE_TYPES = [
+        service_types = [
             "_http._tcp.local.",
             "_https._tcp.local.",
             "_ipp._tcp.local.",
@@ -860,22 +882,30 @@ class NetworkScanner:
         class _Listener:
             """Collects service names as they are found."""
 
-            def add_service(self, zc, type_, name):
+            def add_service(self, _zc, type_, name):
+                """Record a newly discovered service instance."""
                 discovered.append((type_, name))
 
-            def remove_service(self, zc, type_, name):
+            def remove_service(self, _zc, _type, _name):
+                """Ignore service removals during the discovery window."""
                 pass
 
-            def update_service(self, zc, type_, name):
+            def update_service(self, _zc, _type, _name):
+                """Ignore service updates during the discovery window."""
                 pass
 
         try:
             zc = Zeroconf(ip_version=IPVersion.V4Only)  # type: ignore[possibly-undefined]
             listener = _Listener()
             browsers = []
-            for stype in SERVICE_TYPES:
+            for stype in service_types:
                 try:
-                    browsers.append(ServiceBrowser(zc, stype, listener))  # type: ignore[arg-type,possibly-undefined]
+                    browser = ServiceBrowser(  # type: ignore[arg-type,possibly-undefined]
+                        zc,
+                        stype,
+                        listener,
+                    )
+                    browsers.append(browser)
                 except (OSError, ValueError):
                     pass
 
@@ -887,7 +917,10 @@ class NetworkScanner:
                 try:
                     info = zc.get_service_info(type_, name, timeout=2000)
                     if info and info.parsed_addresses():
-                        for addr in info.parsed_addresses(IPVersion.V4Only):  # type: ignore[possibly-undefined]
+                        addresses = info.parsed_addresses(  # type: ignore[possibly-undefined]
+                            IPVersion.V4Only
+                        )
+                        for addr in addresses:
                             if addr not in results:
                                 results[addr] = []
                             entry: Dict[str, Any] = {
@@ -941,11 +974,11 @@ class NetworkScanner:
         """
         results: Dict[str, Dict] = {}
 
-        SSDP_ADDR = "239.255.255.250"
-        SSDP_PORT = 1900
+        ssdp_addr = "239.255.255.250"
+        ssdp_port = 1900
         message = (
             "M-SEARCH * HTTP/1.1\r\n"
-            f"HOST: {SSDP_ADDR}:{SSDP_PORT}\r\n"
+            f"HOST: {ssdp_addr}:{ssdp_port}\r\n"
             'MAN: "ssdp:discover"\r\n'
             f"MX: {int(timeout)}\r\n"
             "ST: ssdp:all\r\n"
@@ -956,7 +989,7 @@ class NetworkScanner:
             sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
             sock.settimeout(timeout + 1)
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            sock.sendto(message.encode(), (SSDP_ADDR, SSDP_PORT))
+            sock.sendto(message.encode(), (ssdp_addr, ssdp_port))
 
             end_time = time.time() + timeout + 1
             while time.time() < end_time:
@@ -1091,7 +1124,7 @@ class NetworkScanner:
                 if len(data) <= num_names_offset + 18:
                     continue
                 num_names = data[num_names_offset]
-                if not (0 < num_names < 30):
+                if not 0 < num_names < 30:
                     continue
                 name_offset = num_names_offset + 1
                 for i in range(min(num_names, 10)):
@@ -1118,10 +1151,8 @@ class NetworkScanner:
         Probe an HTTP(S) port for server header, page title, and X-Powered-By.
         """
         info: Dict[str, str] = {}
-        if not requests:
+        if not requests or not urllib3:
             return info
-
-        import urllib3
 
         urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -1419,7 +1450,7 @@ class NetworkScanner:
                     if device_info:
                         device_info["scan_method"] = scan_method
                         devices.append(device_info)
-                except Exception:
+                except FutureTimeoutError:
                     pass
 
         return devices
@@ -1489,14 +1520,14 @@ class NetworkScanner:
 
                 try:
                     self.mdns_services = mdns_future.result(timeout=15)
-                except Exception as e:
+                except FutureTimeoutError as e:
                     self.mdns_services = {}
                     if self.verbose:
                         print(f"mDNS discovery failed: {e}")
 
                 try:
                     self.ssdp_devices = ssdp_future.result(timeout=10)
-                except Exception as e:
+                except FutureTimeoutError as e:
                     self.ssdp_devices = {}
                     if self.verbose:
                         print(f"SSDP discovery failed: {e}")
@@ -1520,8 +1551,12 @@ class NetworkScanner:
                     enhanced_device = future.result(timeout=30)
                     if enhanced_device:
                         enhanced_devices.append(enhanced_device)
-                except Exception as e:
-                    print(f"Error enhancing device info: {e}")
+                except FutureTimeoutError:
+                    if self.verbose:
+                        device = future_to_device[future]
+                        print(
+                            f"Timed out enhancing device info for {device.get('ip', 'unknown')}"
+                        )
 
         # Track changes if enabled
         if (
@@ -1561,11 +1596,10 @@ class NetworkScanner:
                 try:
                     device_info = future.result(timeout=30)
                     if device_info:
+                        hostname = device_info.get("hostname", "Unknown")
                         devices.append(device_info)
-                        print(
-                            f"Found device: {device_info['ip']} - {device_info.get('hostname', 'Unknown')}"
-                        )
-                except Exception as e:
+                        print(f"Found device: {device_info['ip']} - {hostname}")
+                except FutureTimeoutError as e:
                     if self.verbose:
                         print(f"Error scanning {host}: {e}")
 
@@ -1594,7 +1628,7 @@ class NetworkScanner:
             else:
                 print("Could not access ARP table")
 
-        except Exception as e:
+        except (OSError, subprocess.SubprocessError, UnicodeDecodeError) as e:
             print(f"Error scanning ARP table: {e}")
 
         return devices
@@ -1608,49 +1642,42 @@ class NetworkScanner:
             if not line:
                 continue
 
-            try:
-                if platform.system() == "Windows":
-                    # Windows ARP format: "192.168.1.1     00-11-22-33-44-55     dynamic"
-                    match = re.search(
-                        r"(\d+\.\d+\.\d+\.\d+)\s+([0-9a-fA-F-]{17})\s+(\w+)", line
-                    )
-                    if match:
-                        ip, mac, arp_type = match.groups()
-                        if arp_type.lower() == "dynamic" and self._is_in_network_range(
-                            ip
-                        ):
-                            devices.append(
-                                {
-                                    "ip": ip,
-                                    "mac": mac.replace("-", ":").lower(),
-                                    "hostname": "Unknown",
-                                    "scan_method": "ARP",
-                                    "ping_time": 0,
-                                    "last_seen": datetime.now().isoformat(),
-                                }
-                            )
-                else:
-                    # Linux/macOS ARP format: "192.168.1.1 (192.168.1.1) at 00:11:22:33:44:55 [ether] on eth0"
-                    match = re.search(
-                        r"(\d+\.\d+\.\d+\.\d+).*?([0-9a-fA-F:]{17})", line
-                    )
-                    if match:
-                        ip, mac = match.groups()
-                        if self._is_in_network_range(ip):
-                            devices.append(
-                                {
-                                    "ip": ip,
-                                    "mac": mac.lower(),
-                                    "hostname": "Unknown",
-                                    "scan_method": "ARP",
-                                    "ping_time": 0,
-                                    "last_seen": datetime.now().isoformat(),
-                                }
-                            )
-
-            except Exception as e:
-                if self.verbose:
-                    print(f"Error parsing ARP line '{line}': {e}")
+            if platform.system() == "Windows":
+                # Windows ARP format:
+                # "192.168.1.1     00-11-22-33-44-55     dynamic"
+                match = re.search(
+                    r"(\d+\.\d+\.\d+\.\d+)\s+([0-9a-fA-F-]{17})\s+(\w+)", line
+                )
+                if match:
+                    ip, mac, arp_type = match.groups()
+                    if arp_type.lower() == "dynamic" and self._is_in_network_range(ip):
+                        devices.append(
+                            {
+                                "ip": ip,
+                                "mac": mac.replace("-", ":").lower(),
+                                "hostname": "Unknown",
+                                "scan_method": "ARP",
+                                "ping_time": 0,
+                                "last_seen": datetime.now().isoformat(),
+                            }
+                        )
+            else:
+                # Linux/macOS ARP format:
+                # "192.168.1.1 (192.168.1.1) at 00:11:22:33:44:55 [ether] on eth0"
+                match = re.search(r"(\d+\.\d+\.\d+\.\d+).*?([0-9a-fA-F:]{17})", line)
+                if match:
+                    ip, mac = match.groups()
+                    if self._is_in_network_range(ip):
+                        devices.append(
+                            {
+                                "ip": ip,
+                                "mac": mac.lower(),
+                                "hostname": "Unknown",
+                                "scan_method": "ARP",
+                                "ping_time": 0,
+                                "last_seen": datetime.now().isoformat(),
+                            }
+                        )
 
         return devices
 
@@ -1689,7 +1716,13 @@ class NetworkScanner:
                 arp_devices = self._arp_scan_network()
                 devices.extend(arp_devices)
 
-        except Exception as e:
+        except (
+            ipaddress.AddressValueError,
+            ipaddress.NetmaskValueError,
+            OSError,
+            subprocess.SubprocessError,
+            ValueError,
+        ) as e:
             print(f"Broadcast ping failed: {e}")
 
         # Method 2: Common device IP scanning
@@ -1719,7 +1752,7 @@ class NetworkScanner:
                 for suffix in common_suffixes
                 if ipaddress.IPv4Address(f"{base_ip}.{suffix}") in network
             ]
-        except Exception:
+        except (ipaddress.AddressValueError, ipaddress.NetmaskValueError, ValueError):
             return []
 
     def _scan_gateway_neighbors(self, network_range: str) -> List[Dict[str, Any]]:
@@ -1747,14 +1780,19 @@ class NetworkScanner:
                             test_ip = f"{base_ip}.{test_suffix}"
                             if ipaddress.IPv4Address(test_ip) in network:
                                 candidate_ips.append(test_ip)
-                    except Exception:
+                    except (ipaddress.AddressValueError, ValueError):
                         continue
 
                 devices.extend(
                     self._scan_candidate_hosts(candidate_ips, "Gateway_Neighbor")
                 )
 
-        except Exception as e:
+        except (
+            ipaddress.AddressValueError,
+            ipaddress.NetmaskValueError,
+            OSError,
+            ValueError,
+        ) as e:
             print(f"Gateway neighbor scan error: {e}")
 
         return devices
@@ -1766,7 +1804,7 @@ class NetworkScanner:
                 network = ipaddress.IPv4Network(self.network_range)
                 return ipaddress.IPv4Address(ip) in network
             return True  # If no range set, accept all
-        except Exception:
+        except (ipaddress.AddressValueError, ipaddress.NetmaskValueError, ValueError):
             return False
 
     def _merge_device_lists(
@@ -1918,7 +1956,7 @@ class NetworkScanner:
 
             return device
 
-        except Exception as e:
+        except (KeyError, OSError, TypeError, ValueError) as e:
             if self.verbose:
                 print(f"Error enhancing device {device.get('ip', 'unknown')}: {e}")
             return device
