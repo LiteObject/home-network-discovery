@@ -1398,6 +1398,32 @@ class NetworkScanner:
 
         return device_info
 
+    def _scan_candidate_hosts(
+        self, ips: List[str], scan_method: str
+    ) -> List[Dict[str, Any]]:
+        """Scan a small set of candidate IPs in parallel."""
+        devices = []
+        if not ips:
+            return devices
+
+        with ThreadPoolExecutor(
+            max_workers=min(self.max_threads, len(ips))
+        ) as executor:
+            future_to_ip = {
+                executor.submit(self._scan_single_host, ip): ip for ip in ips
+            }
+
+            for future in as_completed(future_to_ip):
+                try:
+                    device_info = future.result(timeout=30)
+                    if device_info:
+                        device_info["scan_method"] = scan_method
+                        devices.append(device_info)
+                except Exception:
+                    pass
+
+        return devices
+
     def scan_network(self, custom_range: Optional[str] = None) -> List[Dict[str, Any]]:
         """
         Comprehensive network scanning with enhanced mesh network support.
@@ -1456,13 +1482,27 @@ class NetworkScanner:
 
         # Network-wide enrichment: mDNS and SSDP (run once, not per-host)
         if getattr(self.args, "enrich", False):
-            print("Running mDNS/Bonjour service discovery...")
-            self.mdns_services = self._mdns_discover_services()
+            print("Running mDNS/Bonjour and SSDP/UPnP discovery...")
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                mdns_future = executor.submit(self._mdns_discover_services)
+                ssdp_future = executor.submit(self._ssdp_discover)
+
+                try:
+                    self.mdns_services = mdns_future.result(timeout=15)
+                except Exception as e:
+                    self.mdns_services = {}
+                    if self.verbose:
+                        print(f"mDNS discovery failed: {e}")
+
+                try:
+                    self.ssdp_devices = ssdp_future.result(timeout=10)
+                except Exception as e:
+                    self.ssdp_devices = {}
+                    if self.verbose:
+                        print(f"SSDP discovery failed: {e}")
+
             if self.mdns_services:
                 print(f"mDNS found services on {len(self.mdns_services)} device(s)")
-
-            print("Running SSDP/UPnP device discovery...")
-            self.ssdp_devices = self._ssdp_discover()
             if self.ssdp_devices:
                 print(f"SSDP found {len(self.ssdp_devices)} device(s)")
 
@@ -1655,14 +1695,7 @@ class NetworkScanner:
         # Method 2: Common device IP scanning
         print("Scanning common device IPs...")
         common_ips = self._get_common_device_ips(network_range)
-        for ip in common_ips:
-            try:
-                device_info = self._scan_single_host(ip)
-                if device_info:
-                    device_info["scan_method"] = "Aggressive"
-                    devices.append(device_info)
-            except Exception:
-                pass
+        devices.extend(self._scan_candidate_hosts(common_ips, "Aggressive"))
 
         # Method 3: Router/Gateway intensive scan
         print("Performing router discovery...")
@@ -1705,6 +1738,7 @@ class NetworkScanner:
                 # Scan IPs around the gateway (common in mesh networks)
                 gateway_parts = gateway_ip.split(".")
                 base_ip = ".".join(gateway_parts[:3])
+                candidate_ips = []
 
                 for offset in range(-5, 6):  # Scan gateway ±5 addresses
                     try:
@@ -1712,12 +1746,13 @@ class NetworkScanner:
                         if 1 <= test_suffix <= 254:
                             test_ip = f"{base_ip}.{test_suffix}"
                             if ipaddress.IPv4Address(test_ip) in network:
-                                device_info = self._scan_single_host(test_ip)
-                                if device_info:
-                                    device_info["scan_method"] = "Gateway_Neighbor"
-                                    devices.append(device_info)
+                                candidate_ips.append(test_ip)
                     except Exception:
                         continue
+
+                devices.extend(
+                    self._scan_candidate_hosts(candidate_ips, "Gateway_Neighbor")
+                )
 
         except Exception as e:
             print(f"Gateway neighbor scan error: {e}")
@@ -1792,17 +1827,26 @@ class NetworkScanner:
                 except (socket.herror, socket.gaierror):
                     device["hostname"] = "Unknown"
 
-            # Add other enhanced information
+            vendor = device.get("vendor")
+            if not vendor or vendor == "Unknown":
+                vendor = self._get_mac_vendor(device.get("mac", ""))
+
+            open_ports = device.get("open_ports", [])
+            if self.args.ports and not open_ports:
+                open_ports = self._scan_ports(ip)
+
             device.update(
                 {
-                    "vendor": self._get_mac_vendor(device.get("mac", "")),
-                    "open_ports": self._scan_ports(ip) if self.args.ports else [],
+                    "vendor": vendor or "Unknown",
+                    "open_ports": open_ports if self.args.ports else [],
                     "services": (
-                        self._identify_services(ip, self._scan_ports(ip))
+                        self._identify_services(ip, open_ports)
                         if self.args.ports
                         else {}
                     ),
-                    "response_time": device.get("ping_time", 0),
+                    "response_time": device.get(
+                        "response_time", device.get("ping_time", 0)
+                    ),
                 }
             )
 
